@@ -155,28 +155,6 @@ npm run dev
 ```
 > The React web app will open at **`http://localhost:3000`** (or `http://localhost:5173`).
 
----
-
-## 🎯 8–10 LPA Interview Q&A Cheatsheet
-
-When presenting this project in your interview, here are the exact technical questions interviewers will ask and how to answer them:
-
-#### 1. *What is RAG and why did you use it instead of just asking ChatGPT/Mistral directly?*
-> *"LLMs have a knowledge cutoff and cannot access private or proprietary user notes. If you ask an LLM about specific course materials, it either hallucinates or gives generic answers. RAG (Retrieval-Augmented Generation) solves this by first retrieving exact, relevant passages from our vector database and feeding them into the prompt as factual context."*
-
-#### 2. *Explain your Document Chunking and Embedding pipeline.*
-> *"When a PDF is uploaded, I extract the text page-by-page using PyPDF. I split the text into 700-character chunks with a 150-character sliding overlap to prevent cutting critical definitions in half. Each chunk is tagged with metadata (document ID, filename, page number). Then, I pass the chunks through `mistral-embed` to generate 1024-dimensional dense vectors and store them in ChromaDB."*
-
-#### 3. *Why do you have two databases (PostgreSQL and ChromaDB)?*
-> *"Relational databases like PostgreSQL are optimized for structured relational data (users, login credentials, chat session foreign keys, quiz attempt scores). Vector databases like ChromaDB are specialized for high-dimensional approximate nearest neighbor (ANN) similarity search using cosine distance. Using PostgreSQL for application state and ChromaDB for vector search follows industry standard separation of concerns."*
-
-#### 4. *How do you ensure the AI quiz generator doesn't hallucinate outside the notes?*
-> *"The quiz service retrieves representative semantic chunks from the selected document and passes them into a prompt with strict system instructions and a JSON Schema output format. The model is constrained to construct questions and distractors solely from the provided text."*
-
-#### 5. *How do you handle document deletion in both databases?*
-> *"When a user deletes a document, the FastAPI router executes an atomic operation: it removes the record from PostgreSQL (which cascades to related quizzes), deletes the physical file from disk, and queries ChromaDB with a metadata filter (`doc_id == X AND user_id == Y`) to delete all corresponding vector chunks."*
-
----
 
 ## 📜 License
 This project is open-source and built for educational and portfolio demonstration purposes.
