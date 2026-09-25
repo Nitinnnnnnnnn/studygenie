@@ -125,3 +125,14 @@ def get_current_user_profile(
     current_user: User = Depends(get_current_user)
 ):
     return current_user
+
+
+# TEMPORARY DATABASE DIAGNOSTIC
+@router.get("/debug-user-count")
+def debug_user_count(
+    db: Session = Depends(get_db)
+):
+    count = db.query(User).count()
+    return {
+        "user_count": count
+    }
