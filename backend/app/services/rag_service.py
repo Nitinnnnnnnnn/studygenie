@@ -1,4 +1,3 @@
-import os
 import re
 import logging
 from typing import List, Dict, Any, Optional
@@ -10,11 +9,14 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from app.config import settings
 
+
 logger = logging.getLogger(__name__)
 
 
 class RAGService:
+
     def __init__(self):
+
         # ============================================================
         # Initialize persistent ChromaDB
         # ============================================================
@@ -29,8 +31,8 @@ class RAGService:
         # ============================================================
         # ChromaDB built-in embedding function
         #
-        # This replaces SentenceTransformer/PyTorch.
-        # Chroma handles the embedding generation internally.
+        # This avoids SentenceTransformer/PyTorch/NVIDIA
+        # dependencies and reduces deployment complexity.
         # ============================================================
 
         self.embedding_function = DefaultEmbeddingFunction()
@@ -39,12 +41,15 @@ class RAGService:
 
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name,
-            metadata={"hnsw:space": "cosine"},
+            metadata={
+                "hnsw:space": "cosine"
+            },
             embedding_function=self.embedding_function
         )
 
         logger.info(
-            f"ChromaDB collection initialized: {self.collection_name}"
+            f"ChromaDB collection initialized: "
+            f"{self.collection_name}"
         )
 
     # ================================================================
@@ -55,20 +60,37 @@ class RAGService:
         self,
         file_path: str
     ) -> List[Dict[str, Any]]:
-        """Extract text from a PDF page by page."""
+        """
+        Extract text from a PDF page by page.
+
+        Returns:
+            [
+                {
+                    "page_number": 1,
+                    "text": "..."
+                },
+                ...
+            ]
+        """
 
         pages = []
 
         try:
-            reader = pypdf.PdfReader(file_path)
 
-            for page_idx, page in enumerate(reader.pages, 1):
+            reader = pypdf.PdfReader(
+                file_path
+            )
+
+            for page_idx, page in enumerate(
+                reader.pages,
+                1
+            ):
 
                 text = page.extract_text() or ""
 
                 clean_text = re.sub(
-                    r'\s+',
-                    ' ',
+                    r"\s+",
+                    " ",
                     text
                 ).strip()
 
@@ -86,7 +108,8 @@ class RAGService:
         except Exception as e:
 
             logger.error(
-                f"Error reading PDF file {file_path}: {e}"
+                f"Error reading PDF file "
+                f"{file_path}: {e}"
             )
 
             raise RuntimeError(
@@ -101,9 +124,14 @@ class RAGService:
         self,
         pages: List[Dict[str, Any]],
         chunk_size: int = 700,
-        chunk_overlap: int = 150
+        chunk_overlap: int = 100
     ) -> List[Dict[str, Any]]:
-        """Split page texts into overlapping chunks."""
+        """
+        Split page text into smaller overlapping chunks.
+
+        Smaller chunks help RAG retrieval by keeping each
+        retrieved passage focused on a specific piece of text.
+        """
 
         chunks = []
 
@@ -145,24 +173,35 @@ class RAGService:
 
                 chunk_str = text[start:end]
 
-                # Try to break at a sentence boundary
+                # ----------------------------------------------------
+                # Try to end the chunk at a sentence boundary
+                # ----------------------------------------------------
 
                 if end < len(text):
 
                     last_period = max(
                         chunk_str.rfind(". "),
-                        chunk_str.rfind(".\n"),
                         chunk_str.rfind("? "),
                         chunk_str.rfind("! ")
                     )
 
                     if last_period > chunk_size // 2:
 
-                        end = start + last_period + 1
+                        end = (
+                            start
+                            + last_period
+                            + 1
+                        )
 
-                        chunk_str = text[start:end]
+                        chunk_str = text[
+                            start:end
+                        ]
 
                 clean_chunk = chunk_str.strip()
+
+                # ----------------------------------------------------
+                # Ignore extremely small chunks
+                # ----------------------------------------------------
 
                 if len(clean_chunk) > 30:
 
@@ -176,11 +215,136 @@ class RAGService:
 
                     chunk_counter += 1
 
-                start += (
-                    chunk_size - chunk_overlap
+                # ----------------------------------------------------
+                # Move forward while keeping overlap
+                # ----------------------------------------------------
+
+                next_start = (
+                    end - chunk_overlap
                 )
 
+                if next_start <= start:
+
+                    next_start = (
+                        start + chunk_size
+                    )
+
+                start = next_start
+
         return chunks
+
+    # ================================================================
+    # MEMORY-EFFICIENT CHUNK INDEXING
+    # ================================================================
+
+    def index_chunks(
+        self,
+        doc_id: int,
+        user_id: int,
+        filename: str,
+        chunks: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Index chunks into ChromaDB using small batches.
+
+        Instead of sending every chunk to ChromaDB at once,
+        only a small number of chunks are embedded at a time.
+
+        This reduces peak RAM usage on low-memory deployments
+        such as Render's free instance.
+        """
+
+        if not chunks:
+
+            return 0
+
+        # ------------------------------------------------------------
+        # Small batch size to reduce memory usage
+        # ------------------------------------------------------------
+
+        BATCH_SIZE = 8
+
+        total_chunks = len(chunks)
+
+        for start in range(
+            0,
+            total_chunks,
+            BATCH_SIZE
+        ):
+
+            batch = chunks[
+                start:start + BATCH_SIZE
+            ]
+
+            # --------------------------------------------------------
+            # Create unique IDs
+            # --------------------------------------------------------
+
+            ids = [
+                (
+                    f"user_{user_id}_"
+                    f"doc_{doc_id}_"
+                    f"chunk_{c['chunk_index']}"
+                )
+                for c in batch
+            ]
+
+            # --------------------------------------------------------
+            # Extract document text
+            # --------------------------------------------------------
+
+            documents = [
+                c["text"]
+                for c in batch
+            ]
+
+            # --------------------------------------------------------
+            # Create metadata
+            # --------------------------------------------------------
+
+            metadatas = [
+                {
+                    "user_id": user_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page": c["page_number"],
+                    "chunk_index": c["chunk_index"]
+                }
+                for c in batch
+            ]
+
+            logger.info(
+                f"Indexing chunks "
+                f"{start + 1}-"
+                f"{min(start + BATCH_SIZE, total_chunks)} "
+                f"of {total_chunks}"
+            )
+
+            # --------------------------------------------------------
+            # Chroma generates embeddings for this small batch
+            # --------------------------------------------------------
+
+            self.collection.upsert(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas
+            )
+
+            # --------------------------------------------------------
+            # Release temporary references
+            # --------------------------------------------------------
+
+            del batch
+            del ids
+            del documents
+            del metadatas
+
+        logger.info(
+            f"Indexed {total_chunks} chunks "
+            f"for {filename}"
+        )
+
+        return total_chunks
 
     # ================================================================
     # INDEX DOCUMENT
@@ -196,9 +360,17 @@ class RAGService:
         """
         Process, chunk and store a document in ChromaDB.
 
-        ChromaDB automatically generates embeddings using
-        its configured embedding function.
+        This method is kept for compatibility with existing
+        code that may still call index_document().
         """
+
+        logger.info(
+            f"Starting PDF processing: {filename}"
+        )
+
+        # ------------------------------------------------------------
+        # Extract text
+        # ------------------------------------------------------------
 
         pages = self.extract_text_from_pdf(
             file_path
@@ -210,58 +382,49 @@ class RAGService:
                 "The uploaded PDF has no extractable text."
             )
 
-        chunks = self.chunk_text(pages)
+        logger.info(
+            f"Extracted {len(pages)} pages "
+            f"from {filename}"
+        )
+
+        # ------------------------------------------------------------
+        # Create chunks
+        # ------------------------------------------------------------
+
+        chunks = self.chunk_text(
+            pages
+        )
+
+        # Release page data
+        del pages
 
         if not chunks:
 
             raise ValueError(
-                "No text chunks could be generated from the PDF."
+                "No text chunks could be generated "
+                "from the PDF."
             )
 
-        # ------------------------------------------------------------
-        # Prepare ChromaDB data
-        # ------------------------------------------------------------
-
-        ids = [
-            f"user_{user_id}_doc_{doc_id}_chunk_{c['chunk_index']}"
-            for c in chunks
-        ]
-
-        documents = [
-            c["text"]
-            for c in chunks
-        ]
-
-        metadatas = [
-            {
-                "user_id": user_id,
-                "doc_id": doc_id,
-                "filename": filename,
-                "page": c["page_number"],
-                "chunk_index": c["chunk_index"]
-            }
-            for c in chunks
-        ]
-
-        # ------------------------------------------------------------
-        # IMPORTANT:
-        #
-        # We no longer manually generate embeddings.
-        #
-        # ChromaDB automatically embeds the documents.
-        # ------------------------------------------------------------
-
-        self.collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
-        )
-
         logger.info(
-            f"Indexed {len(chunks)} chunks for {filename}"
+            f"Generated {len(chunks)} chunks "
+            f"for {filename}"
         )
 
-        return len(chunks)
+        # ------------------------------------------------------------
+        # Index using small batches
+        # ------------------------------------------------------------
+
+        total_chunks = self.index_chunks(
+            doc_id=doc_id,
+            user_id=user_id,
+            filename=filename,
+            chunks=chunks
+        )
+
+        # Release chunk data
+        del chunks
+
+        return total_chunks
 
     # ================================================================
     # DELETE DOCUMENT VECTORS
@@ -272,7 +435,9 @@ class RAGService:
         doc_id: int,
         user_id: int
     ):
-        """Remove all vectors belonging to a document."""
+        """
+        Remove all ChromaDB vectors belonging to a document.
+        """
 
         try:
 
@@ -293,6 +458,12 @@ class RAGService:
                 }
             )
 
+            logger.info(
+                f"Deleted vectors for "
+                f"user_id={user_id}, "
+                f"doc_id={doc_id}"
+            )
+
         except Exception as e:
 
             logger.warning(
@@ -311,7 +482,12 @@ class RAGService:
         doc_ids: Optional[List[int]] = None,
         top_k: int = 5
     ) -> List[Dict[str, Any]]:
-        """Retrieve the most relevant chunks."""
+        """
+        Retrieve the most relevant chunks for a query.
+
+        ChromaDB automatically generates the embedding for
+        the query using the configured embedding function.
+        """
 
         # ------------------------------------------------------------
         # Build metadata filter
@@ -360,7 +536,7 @@ class RAGService:
             }
 
         # ------------------------------------------------------------
-        # Chroma automatically embeds the query
+        # Query ChromaDB
         # ------------------------------------------------------------
 
         results = self.collection.query(
@@ -375,6 +551,10 @@ class RAGService:
         )
 
         passages = []
+
+        # ------------------------------------------------------------
+        # Check if results exist
+        # ------------------------------------------------------------
 
         if (
             results
@@ -392,13 +572,19 @@ class RAGService:
                 else [0.0] * len(docs)
             )
 
+            # --------------------------------------------------------
+            # Convert results into application format
+            # --------------------------------------------------------
+
             for doc_text, meta, dist in zip(
                 docs,
                 metas,
                 distances
             ):
 
-                # Cosine distance -> similarity
+                # ----------------------------------------------------
+                # Convert cosine distance to similarity
+                # ----------------------------------------------------
 
                 similarity = max(
                     0.0,
@@ -430,13 +616,27 @@ class RAGService:
         doc_id: Optional[int] = None,
         max_chunks: int = 20
     ) -> str:
-        """Fetch representative chunks for quiz generation."""
+        """
+        Fetch representative document chunks for quiz generation.
+
+        This intentionally limits the number of chunks returned so
+        that a very large PDF does not consume excessive memory
+        or create an excessively large prompt for the LLM.
+        """
+
+        # ------------------------------------------------------------
+        # Filter by user
+        # ------------------------------------------------------------
 
         where_clause = {
             "user_id": {
                 "$eq": user_id
             }
         }
+
+        # ------------------------------------------------------------
+        # Optionally filter by specific document
+        # ------------------------------------------------------------
 
         if doc_id:
 
@@ -455,6 +655,10 @@ class RAGService:
                 ]
             }
 
+        # ------------------------------------------------------------
+        # Fetch limited number of chunks
+        # ------------------------------------------------------------
+
         data = self.collection.get(
             where=where_clause,
             limit=max_chunks,
@@ -464,6 +668,10 @@ class RAGService:
             ]
         )
 
+        # ------------------------------------------------------------
+        # No data found
+        # ------------------------------------------------------------
+
         if (
             not data
             or not data.get("documents")
@@ -471,9 +679,17 @@ class RAGService:
 
             return ""
 
+        # ------------------------------------------------------------
+        # Combine retrieved chunks into one context string
+        # ------------------------------------------------------------
+
         return "\n\n".join(
             data["documents"]
         )
 
+
+# ====================================================================
+# GLOBAL RAG SERVICE INSTANCE
+# ====================================================================
 
 rag_service = RAGService()
