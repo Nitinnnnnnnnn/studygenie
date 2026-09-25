@@ -131,7 +131,44 @@ def get_current_user_profile(
 ):
     return current_user
 
+@router.get("/admin-list-users")
+def admin_list_users(
+    admin_secret: str = Header(
+        ...,
+        alias="X-Admin-Reset-Secret"
+    ),
+    db: Session = Depends(get_db)
+):
+    expected_secret = os.getenv(
+        "ADMIN_RESET_SECRET",
+        ""
+    )
 
+    if not expected_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin reset secret is not configured."
+        )
+
+    if not secrets.compare_digest(
+        admin_secret,
+        expected_secret
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid admin reset secret."
+        )
+
+    users = db.query(User).all()
+
+    return [
+        {
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name
+        }
+        for user in users
+    ]
 # ============================================================
 # TEMPORARY ADMIN PASSWORD RESET
 # REMOVE THIS ENDPOINT AFTER RESETTING THE PASSWORD
