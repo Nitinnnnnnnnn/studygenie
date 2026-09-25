@@ -131,6 +131,12 @@ def get_current_user_profile(
 ):
     return current_user
 
+
+# ============================================================
+# TEMPORARY ADMIN - LIST USERS
+# REMOVE AFTER DEBUGGING
+# ============================================================
+
 @router.get("/admin-list-users")
 def admin_list_users(
     admin_secret: str = Header(
@@ -169,9 +175,11 @@ def admin_list_users(
         }
         for user in users
     ]
+
+
 # ============================================================
 # TEMPORARY ADMIN PASSWORD RESET
-# REMOVE THIS ENDPOINT AFTER RESETTING THE PASSWORD
+# REMOVE AFTER RESETTING THE PASSWORD
 # ============================================================
 
 @router.post("/admin-reset-password")
@@ -184,20 +192,17 @@ def admin_reset_password(
     ),
     db: Session = Depends(get_db)
 ):
-    # Get the secret stored in Render Environment Variables
     expected_secret = os.getenv(
         "ADMIN_RESET_SECRET",
         ""
     )
 
-    # Check whether the secret is configured
     if not expected_secret:
         raise HTTPException(
             status_code=500,
             detail="Admin reset secret is not configured."
         )
 
-    # Secure comparison
     if not secrets.compare_digest(
         admin_secret,
         expected_secret
@@ -207,7 +212,6 @@ def admin_reset_password(
             detail="Invalid admin reset secret."
         )
 
-    # Find the user
     user = (
         db.query(User)
         .filter(User.email == email)
@@ -220,7 +224,6 @@ def admin_reset_password(
             detail="User not found."
         )
 
-    # Hash the new password
     user.hashed_password = get_password_hash(
         new_password
     )
