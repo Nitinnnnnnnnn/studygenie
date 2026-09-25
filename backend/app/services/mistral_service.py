@@ -3,7 +3,6 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from groq import Groq
-from sentence_transformers import SentenceTransformer
 
 from app.config import settings
 
@@ -19,10 +18,10 @@ class MistralService:
     Mistral. The name is kept so that the rest of the existing StudyGenie
     code does not need to be changed.
 
-    AI architecture:
-        - Embeddings: local Sentence Transformer
-        - Chat/RAG: Groq
-        - Quiz generation: Groq
+   AI architecture:
+    - Embeddings: ChromaDB built-in embedding function
+    - Chat/RAG: Groq
+    - Quiz generation: Groq
     """
 
     def __init__(self):
@@ -37,19 +36,9 @@ class MistralService:
         if self.api_key:
             self.client = Groq(api_key=self.api_key)
 
-        # ==============================
-        # Local embedding model
-        # ==============================
+       
 
-        logger.info(
-            f"Loading local embedding model: {settings.EMBEDDING_MODEL}"
-        )
-
-        self.embedding_model = SentenceTransformer(
-            settings.EMBEDDING_MODEL
-        )
-
-        logger.info("Local embedding model loaded successfully")
+    
 
     # ============================================================
     # Configuration
@@ -64,39 +53,6 @@ class MistralService:
             and self.client is not None
         )
 
-    # ============================================================
-    # EMBEDDINGS
-    # ============================================================
-
-    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """
-        Generate local embeddings using Sentence Transformers.
-
-        Model:
-            sentence-transformers/all-MiniLM-L6-v2
-
-        Output:
-            384-dimensional vectors
-        """
-
-        if not texts:
-            return []
-
-        try:
-            embeddings = self.embedding_model.encode(
-                texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False
-            )
-
-            return embeddings.tolist()
-
-        except Exception as e:
-            logger.error(f"Error generating local embeddings: {e}")
-            raise RuntimeError(
-                f"Local embedding generation error: {str(e)}"
-            )
 
     # ============================================================
     # RAG CHAT
