@@ -44,6 +44,6 @@ def root():
 def health_check():
     return {
         "status": "online",
-        "mistral_configured": bool(settings.MISTRAL_API_KEY and settings.MISTRAL_API_KEY != "your_mistral_api_key_here"),
+        "groq_configured": bool(settings.GROQ_API_KEY and settings.GROQ_API_KEY != "your_groq_api_key_here"),
         "database": "connected"
     }
