@@ -50,9 +50,9 @@ async def upload_documents(
         1. Save PDF
         2. Extract text
         3. Create chunks
-        4. Generate embeddings in small batches
+        4. Generate embeddings in batches
         5. Store vectors in ChromaDB
-        6. Save document information in SQLite
+        6. Save document information in PostgreSQL
     """
 
     # ================================================================
@@ -60,7 +60,6 @@ async def upload_documents(
     # ================================================================
 
     if not files:
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files provided."
@@ -184,14 +183,11 @@ async def upload_documents(
             # Extract PDF text ONCE
             # --------------------------------------------------------
 
-            pages = (
-                rag_service.extract_text_from_pdf(
-                    file_path
-                )
+            pages = rag_service.extract_text_from_pdf(
+                file_path
             )
 
             if not pages:
-
                 raise ValueError(
                     "The uploaded PDF has no "
                     "extractable text."
@@ -217,7 +213,6 @@ async def upload_documents(
             del pages
 
             if not chunks:
-
                 raise ValueError(
                     "No text chunks could be "
                     "generated from the PDF."
@@ -230,19 +225,16 @@ async def upload_documents(
             )
 
             # --------------------------------------------------------
-            # Index chunks in small batches
+            # Index chunks in batches
             #
-            # The actual batch size is controlled inside
-            # rag_service.py.
+            # Batch size is controlled inside rag_service.py.
             # --------------------------------------------------------
 
-            chunk_count = (
-                rag_service.index_chunks(
-                    doc_id=doc_record.id,
-                    user_id=current_user.id,
-                    filename=file.filename,
-                    chunks=chunks
-                )
+            chunk_count = rag_service.index_chunks(
+                doc_id=doc_record.id,
+                user_id=current_user.id,
+                filename=file.filename,
+                chunks=chunks
             )
 
             # Release chunk list
@@ -258,13 +250,8 @@ async def upload_documents(
             # Update database record
             # --------------------------------------------------------
 
-            doc_record.total_pages = (
-                total_pages
-            )
-
-            doc_record.chunk_count = (
-                chunk_count
-            )
+            doc_record.total_pages = total_pages
+            doc_record.chunk_count = chunk_count
 
             # --------------------------------------------------------
             # Commit database transaction
@@ -298,9 +285,6 @@ async def upload_documents(
 
             # --------------------------------------------------------
             # Remove partially indexed ChromaDB vectors
-            #
-            # This is important if ChromaDB successfully indexed
-            # some batches before an error occurred.
             # --------------------------------------------------------
 
             try:
@@ -352,9 +336,7 @@ async def upload_documents(
                     )
 
             raise HTTPException(
-                status_code=(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR
-                ),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=(
                     f"Failed to index "
                     f"{file.filename}: "
@@ -369,11 +351,9 @@ async def upload_documents(
         finally:
 
             try:
-
                 await file.close()
 
             except Exception:
-
                 pass
 
     # ================================================================
@@ -450,7 +430,7 @@ def delete_document(
     This removes:
         1. ChromaDB vectors
         2. Physical PDF
-        3. Database record
+        3. PostgreSQL database record
     """
 
     # ================================================================

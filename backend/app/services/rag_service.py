@@ -32,7 +32,7 @@ class RAGService:
         # ChromaDB built-in embedding function
         #
         # This avoids SentenceTransformer/PyTorch/NVIDIA
-        # dependencies and reduces deployment complexity.
+        # dependencies and keeps deployment memory lower.
         # ============================================================
 
         self.embedding_function = DefaultEmbeddingFunction()
@@ -81,6 +81,13 @@ class RAGService:
                 file_path
             )
 
+            total_pdf_pages = len(reader.pages)
+
+            logger.info(
+                f"Starting text extraction: "
+                f"{total_pdf_pages} PDF pages"
+            )
+
             for page_idx, page in enumerate(
                 reader.pages,
                 1
@@ -103,6 +110,19 @@ class RAGService:
                         }
                     )
 
+                # Log progress every 50 pages
+                if page_idx % 50 == 0:
+
+                    logger.info(
+                        f"Extracted text from "
+                        f"{page_idx}/{total_pdf_pages} pages"
+                    )
+
+            logger.info(
+                f"PDF extraction complete: "
+                f"{len(pages)} pages contained text"
+            )
+
             return pages
 
         except Exception as e:
@@ -123,14 +143,15 @@ class RAGService:
     def chunk_text(
         self,
         pages: List[Dict[str, Any]],
-        chunk_size: int = 700,
+        chunk_size: int = 900,
         chunk_overlap: int = 100
     ) -> List[Dict[str, Any]]:
         """
         Split page text into smaller overlapping chunks.
 
-        Smaller chunks help RAG retrieval by keeping each
-        retrieved passage focused on a specific piece of text.
+        900-character chunks reduce the total number of chunks
+        compared with the previous 700-character configuration,
+        which reduces the number of embeddings that must be generated.
         """
 
         chunks = []
@@ -231,6 +252,11 @@ class RAGService:
 
                 start = next_start
 
+        logger.info(
+            f"Chunking complete: "
+            f"{len(chunks)} chunks generated"
+        )
+
         return chunks
 
     # ================================================================
@@ -245,13 +271,11 @@ class RAGService:
         chunks: List[Dict[str, Any]]
     ) -> int:
         """
-        Index chunks into ChromaDB using small batches.
+        Index chunks into ChromaDB using controlled batches.
 
-        Instead of sending every chunk to ChromaDB at once,
-        only a small number of chunks are embedded at a time.
-
-        This reduces peak RAM usage on low-memory deployments
-        such as Render's free instance.
+        Batch size is increased from 8 to 32 to reduce the number
+        of ChromaDB operations while remaining reasonable for
+        Render's limited memory.
         """
 
         if not chunks:
@@ -259,12 +283,18 @@ class RAGService:
             return 0
 
         # ------------------------------------------------------------
-        # Small batch size to reduce memory usage
+        # Optimized batch size
         # ------------------------------------------------------------
 
-        BATCH_SIZE = 8
+        BATCH_SIZE = 32
 
         total_chunks = len(chunks)
+
+        logger.info(
+            f"Starting ChromaDB indexing: "
+            f"{total_chunks} chunks, "
+            f"batch size={BATCH_SIZE}"
+        )
 
         for start in range(
             0,
@@ -313,15 +343,19 @@ class RAGService:
                 for c in batch
             ]
 
+            batch_end = min(
+                start + BATCH_SIZE,
+                total_chunks
+            )
+
             logger.info(
                 f"Indexing chunks "
-                f"{start + 1}-"
-                f"{min(start + BATCH_SIZE, total_chunks)} "
+                f"{start + 1}-{batch_end} "
                 f"of {total_chunks}"
             )
 
             # --------------------------------------------------------
-            # Chroma generates embeddings for this small batch
+            # Chroma generates embeddings for this batch
             # --------------------------------------------------------
 
             self.collection.upsert(
@@ -411,7 +445,7 @@ class RAGService:
         )
 
         # ------------------------------------------------------------
-        # Index using small batches
+        # Index using controlled batches
         # ------------------------------------------------------------
 
         total_chunks = self.index_chunks(
@@ -619,9 +653,8 @@ class RAGService:
         """
         Fetch representative document chunks for quiz generation.
 
-        This intentionally limits the number of chunks returned so
-        that a very large PDF does not consume excessive memory
-        or create an excessively large prompt for the LLM.
+        The number of chunks is intentionally limited so that
+        very large PDFs do not create unnecessarily large prompts.
         """
 
         # ------------------------------------------------------------
