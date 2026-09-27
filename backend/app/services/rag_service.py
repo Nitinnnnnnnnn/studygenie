@@ -31,20 +31,24 @@ class RAGService:
         # ============================================================
         # ChromaDB built-in embedding function
         #
-        # This avoids SentenceTransformer/PyTorch/NVIDIA
-        # dependencies and keeps deployment memory lower.
+        # This avoids SentenceTransformer / PyTorch dependencies
+        # and keeps deployment memory requirements lower.
         # ============================================================
 
         self.embedding_function = DefaultEmbeddingFunction()
 
-        self.collection_name = "studygenie_knowledge_base_v2"
+        self.collection_name = (
+            "studygenie_knowledge_base_v2"
+        )
 
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={
-                "hnsw:space": "cosine"
-            },
-            embedding_function=self.embedding_function
+        self.collection = (
+            self.chroma_client.get_or_create_collection(
+                name=self.collection_name,
+                metadata={
+                    "hnsw:space": "cosine"
+                },
+                embedding_function=self.embedding_function
+            )
         )
 
         logger.info(
@@ -61,16 +65,13 @@ class RAGService:
         file_path: str
     ) -> List[Dict[str, Any]]:
         """
-        Extract text from a PDF page by page.
+        Extract text from the entire PDF.
 
-        Returns:
-            [
-                {
-                    "page_number": 1,
-                    "text": "..."
-                },
-                ...
-            ]
+        This method is kept for compatibility with existing code.
+
+        NOTE:
+        For large PDFs, prefer process_pdf_page_by_page()
+        because this method keeps all extracted pages in memory.
         """
 
         pages = []
@@ -81,11 +82,11 @@ class RAGService:
                 file_path
             )
 
-            total_pdf_pages = len(reader.pages)
+            total_pages = len(reader.pages)
 
             logger.info(
-                f"Starting text extraction: "
-                f"{total_pdf_pages} PDF pages"
+                f"Starting PDF extraction: "
+                f"{total_pages} pages"
             )
 
             for page_idx, page in enumerate(
@@ -110,12 +111,11 @@ class RAGService:
                         }
                     )
 
-                # Log progress every 50 pages
                 if page_idx % 50 == 0:
 
                     logger.info(
-                        f"Extracted text from "
-                        f"{page_idx}/{total_pdf_pages} pages"
+                        f"Extracted "
+                        f"{page_idx}/{total_pages} pages"
                     )
 
             logger.info(
@@ -127,14 +127,54 @@ class RAGService:
 
         except Exception as e:
 
-            logger.error(
+            logger.exception(
                 f"Error reading PDF file "
-                f"{file_path}: {e}"
+                f"{file_path}"
             )
 
             raise RuntimeError(
                 f"Could not parse PDF: {str(e)}"
             )
+
+    # ================================================================
+    # EXTRACT SINGLE PAGE
+    # ================================================================
+
+    def extract_page_text(
+        self,
+        page,
+        page_number: int
+    ) -> Optional[str]:
+        """
+        Extract and clean text from one PDF page.
+
+        Only one page's text is kept in memory at a time.
+        """
+
+        try:
+
+            text = page.extract_text() or ""
+
+            clean_text = re.sub(
+                r"\s+",
+                " ",
+                text
+            ).strip()
+
+            if not clean_text:
+
+                return None
+
+            return clean_text
+
+        except Exception as e:
+
+            logger.warning(
+                f"Could not extract page "
+                f"{page_number}: {e}"
+            )
+
+            return None
 
     # ================================================================
     # TEXT CHUNKING
@@ -143,15 +183,15 @@ class RAGService:
     def chunk_text(
         self,
         pages: List[Dict[str, Any]],
-        chunk_size: int = 900,
+        chunk_size: int = 800,
         chunk_overlap: int = 100
     ) -> List[Dict[str, Any]]:
         """
-        Split page text into smaller overlapping chunks.
+        Split pages into overlapping chunks.
 
-        900-character chunks reduce the total number of chunks
-        compared with the previous 700-character configuration,
-        which reduces the number of embeddings that must be generated.
+        This method is kept for compatibility with existing code.
+
+        For large PDFs, use process_pdf_page_by_page() instead.
         """
 
         chunks = []
@@ -164,93 +204,17 @@ class RAGService:
 
             text = page_data["text"]
 
-            # --------------------------------------------------------
-            # Small page
-            # --------------------------------------------------------
+            page_chunks = self._chunk_single_page(
+                text=text,
+                page_number=page_num,
+                starting_index=chunk_counter,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap
+            )
 
-            if len(text) <= chunk_size:
+            chunks.extend(page_chunks)
 
-                chunks.append(
-                    {
-                        "chunk_index": chunk_counter,
-                        "page_number": page_num,
-                        "text": text
-                    }
-                )
-
-                chunk_counter += 1
-
-                continue
-
-            # --------------------------------------------------------
-            # Larger page
-            # --------------------------------------------------------
-
-            start = 0
-
-            while start < len(text):
-
-                end = start + chunk_size
-
-                chunk_str = text[start:end]
-
-                # ----------------------------------------------------
-                # Try to end the chunk at a sentence boundary
-                # ----------------------------------------------------
-
-                if end < len(text):
-
-                    last_period = max(
-                        chunk_str.rfind(". "),
-                        chunk_str.rfind("? "),
-                        chunk_str.rfind("! ")
-                    )
-
-                    if last_period > chunk_size // 2:
-
-                        end = (
-                            start
-                            + last_period
-                            + 1
-                        )
-
-                        chunk_str = text[
-                            start:end
-                        ]
-
-                clean_chunk = chunk_str.strip()
-
-                # ----------------------------------------------------
-                # Ignore extremely small chunks
-                # ----------------------------------------------------
-
-                if len(clean_chunk) > 30:
-
-                    chunks.append(
-                        {
-                            "chunk_index": chunk_counter,
-                            "page_number": page_num,
-                            "text": clean_chunk
-                        }
-                    )
-
-                    chunk_counter += 1
-
-                # ----------------------------------------------------
-                # Move forward while keeping overlap
-                # ----------------------------------------------------
-
-                next_start = (
-                    end - chunk_overlap
-                )
-
-                if next_start <= start:
-
-                    next_start = (
-                        start + chunk_size
-                    )
-
-                start = next_start
+            chunk_counter += len(page_chunks)
 
         logger.info(
             f"Chunking complete: "
@@ -260,7 +224,413 @@ class RAGService:
         return chunks
 
     # ================================================================
-    # MEMORY-EFFICIENT CHUNK INDEXING
+    # CHUNK ONE PAGE
+    # ================================================================
+
+    def _chunk_single_page(
+        self,
+        text: str,
+        page_number: int,
+        starting_index: int,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Create chunks from ONE page only.
+
+        This prevents the entire PDF from being converted into
+        chunks at once.
+        """
+
+        chunks = []
+
+        if not text:
+
+            return chunks
+
+        # ------------------------------------------------------------
+        # Small page
+        # ------------------------------------------------------------
+
+        if len(text) <= chunk_size:
+
+            if len(text) > 30:
+
+                chunks.append(
+                    {
+                        "chunk_index": starting_index,
+                        "page_number": page_number,
+                        "text": text
+                    }
+                )
+
+            return chunks
+
+        # ------------------------------------------------------------
+        # Large page
+        # ------------------------------------------------------------
+
+        start = 0
+
+        chunk_counter = starting_index
+
+        while start < len(text):
+
+            end = start + chunk_size
+
+            chunk_str = text[start:end]
+
+            # --------------------------------------------------------
+            # Try to end at sentence boundary
+            # --------------------------------------------------------
+
+            if end < len(text):
+
+                last_period = max(
+                    chunk_str.rfind(". "),
+                    chunk_str.rfind("? "),
+                    chunk_str.rfind("! ")
+                )
+
+                if last_period > chunk_size // 2:
+
+                    end = (
+                        start
+                        + last_period
+                        + 1
+                    )
+
+                    chunk_str = text[
+                        start:end
+                    ]
+
+            clean_chunk = chunk_str.strip()
+
+            # --------------------------------------------------------
+            # Ignore extremely small chunks
+            # --------------------------------------------------------
+
+            if len(clean_chunk) > 30:
+
+                chunks.append(
+                    {
+                        "chunk_index": chunk_counter,
+                        "page_number": page_number,
+                        "text": clean_chunk
+                    }
+                )
+
+                chunk_counter += 1
+
+            # --------------------------------------------------------
+            # Maintain overlap
+            # --------------------------------------------------------
+
+            next_start = (
+                end - chunk_overlap
+            )
+
+            if next_start <= start:
+
+                next_start = (
+                    start + chunk_size
+                )
+
+            start = next_start
+
+        return chunks
+
+    # ================================================================
+    # INDEX SMALL BATCH
+    # ================================================================
+
+    def _index_batch(
+        self,
+        doc_id: int,
+        user_id: int,
+        filename: str,
+        batch: List[Dict[str, Any]]
+    ):
+        """
+        Index one small batch into ChromaDB.
+
+        Batch size is intentionally small because Render's
+        free instance has limited memory.
+        """
+
+        if not batch:
+
+            return
+
+        ids = [
+            (
+                f"user_{user_id}_"
+                f"doc_{doc_id}_"
+                f"chunk_{chunk['chunk_index']}"
+            )
+            for chunk in batch
+        ]
+
+        documents = [
+            chunk["text"]
+            for chunk in batch
+        ]
+
+        metadatas = [
+            {
+                "user_id": user_id,
+                "doc_id": doc_id,
+                "filename": filename,
+                "page": chunk["page_number"],
+                "chunk_index": chunk["chunk_index"]
+            }
+            for chunk in batch
+        ]
+
+        self.collection.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas
+        )
+
+        # Explicitly release temporary objects
+        del ids
+        del documents
+        del metadatas
+
+    # ================================================================
+    # PAGE-BY-PAGE PDF PROCESSING
+    # ================================================================
+
+    def process_pdf_page_by_page(
+        self,
+        doc_id: int,
+        user_id: int,
+        filename: str,
+        file_path: str,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100,
+        batch_size: int = 8
+    ) -> Dict[str, int]:
+        """
+        Process a PDF page-by-page.
+
+        MEMORY-EFFICIENT PIPELINE:
+
+            PDF
+             ↓
+            one page
+             ↓
+            extract text
+             ↓
+            create chunks
+             ↓
+            small ChromaDB batch
+             ↓
+            release memory
+             ↓
+            next page
+
+        The entire PDF's pages and chunks are NEVER stored
+        in memory simultaneously.
+        """
+
+        total_pages = 0
+        pages_with_text = 0
+        total_chunks = 0
+
+        # Temporary batch containing only a few chunks
+        batch = []
+
+        try:
+
+            reader = pypdf.PdfReader(
+                file_path
+            )
+
+            total_pages = len(
+                reader.pages
+            )
+
+            logger.info(
+                f"Starting memory-efficient PDF processing: "
+                f"{filename}"
+            )
+
+            logger.info(
+                f"Total PDF pages: {total_pages}"
+            )
+
+            # --------------------------------------------------------
+            # Process ONE page at a time
+            # --------------------------------------------------------
+
+            for page_index, page in enumerate(
+                reader.pages,
+                1
+            ):
+
+                # ----------------------------------------------------
+                # Extract only this page
+                # ----------------------------------------------------
+
+                page_text = self.extract_page_text(
+                    page=page,
+                    page_number=page_index
+                )
+
+                if not page_text:
+
+                    continue
+
+                pages_with_text += 1
+
+                # ----------------------------------------------------
+                # Chunk only this page
+                # ----------------------------------------------------
+
+                page_chunks = self._chunk_single_page(
+                    text=page_text,
+                    page_number=page_index,
+                    starting_index=total_chunks,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap
+                )
+
+                # page_text is no longer needed
+                del page_text
+
+                # ----------------------------------------------------
+                # Add page chunks to small batch
+                # ----------------------------------------------------
+
+                for chunk in page_chunks:
+
+                    batch.append(chunk)
+
+                    total_chunks += 1
+
+                    # ------------------------------------------------
+                    # Index when batch reaches limit
+                    # ------------------------------------------------
+
+                    if len(batch) >= batch_size:
+
+                        batch_start = (
+                            total_chunks
+                            - len(batch)
+                            + 1
+                        )
+
+                        batch_end = total_chunks
+
+                        logger.info(
+                            f"Indexing chunks "
+                            f"{batch_start}-{batch_end} "
+                            f"of {filename}"
+                        )
+
+                        self._index_batch(
+                            doc_id=doc_id,
+                            user_id=user_id,
+                            filename=filename,
+                            batch=batch
+                        )
+
+                        # Completely release batch
+                        batch.clear()
+
+                # ----------------------------------------------------
+                # Release page chunks
+                # ----------------------------------------------------
+
+                del page_chunks
+
+                # ----------------------------------------------------
+                # Progress logging
+                # ----------------------------------------------------
+
+                if (
+                    page_index % 10 == 0
+                    or page_index == total_pages
+                ):
+
+                    logger.info(
+                        f"Processed "
+                        f"{page_index}/{total_pages} pages | "
+                        f"chunks indexed/queued: "
+                        f"{total_chunks}"
+                    )
+
+            # --------------------------------------------------------
+            # Index remaining chunks
+            # --------------------------------------------------------
+
+            if batch:
+
+                batch_start = (
+                    total_chunks
+                    - len(batch)
+                    + 1
+                )
+
+                batch_end = total_chunks
+
+                logger.info(
+                    f"Indexing final chunks "
+                    f"{batch_start}-{batch_end}"
+                )
+
+                self._index_batch(
+                    doc_id=doc_id,
+                    user_id=user_id,
+                    filename=filename,
+                    batch=batch
+                )
+
+                batch.clear()
+
+            logger.info(
+                f"PDF processing complete: "
+                f"{filename} | "
+                f"pages={total_pages} | "
+                f"pages_with_text={pages_with_text} | "
+                f"chunks={total_chunks}"
+            )
+
+            return {
+                "total_pages": total_pages,
+                "pages_with_text": pages_with_text,
+                "chunk_count": total_chunks
+            }
+
+        except Exception as e:
+
+            logger.exception(
+                f"Failed processing PDF "
+                f"{filename}: {e}"
+            )
+
+            # Release temporary memory
+            batch.clear()
+
+            raise
+
+        finally:
+
+            # --------------------------------------------------------
+            # Release PDF reader
+            # --------------------------------------------------------
+
+            try:
+                del reader
+            except Exception:
+                pass
+
+            batch.clear()
+
+    # ================================================================
+    # INDEX CHUNKS
     # ================================================================
 
     def index_chunks(
@@ -271,22 +641,18 @@ class RAGService:
         chunks: List[Dict[str, Any]]
     ) -> int:
         """
-        Index chunks into ChromaDB using controlled batches.
+        Index an already-created list of chunks.
 
-        Batch size is increased from 8 to 32 to reduce the number
-        of ChromaDB operations while remaining reasonable for
-        Render's limited memory.
+        Kept for compatibility with existing code.
+
+        Uses batch size 8 for low-memory deployments.
         """
 
         if not chunks:
 
             return 0
 
-        # ------------------------------------------------------------
-        # Optimized batch size
-        # ------------------------------------------------------------
-
-        BATCH_SIZE = 32
+        BATCH_SIZE = 8
 
         total_chunks = len(chunks)
 
@@ -306,72 +672,21 @@ class RAGService:
                 start:start + BATCH_SIZE
             ]
 
-            # --------------------------------------------------------
-            # Create unique IDs
-            # --------------------------------------------------------
-
-            ids = [
-                (
-                    f"user_{user_id}_"
-                    f"doc_{doc_id}_"
-                    f"chunk_{c['chunk_index']}"
-                )
-                for c in batch
-            ]
-
-            # --------------------------------------------------------
-            # Extract document text
-            # --------------------------------------------------------
-
-            documents = [
-                c["text"]
-                for c in batch
-            ]
-
-            # --------------------------------------------------------
-            # Create metadata
-            # --------------------------------------------------------
-
-            metadatas = [
-                {
-                    "user_id": user_id,
-                    "doc_id": doc_id,
-                    "filename": filename,
-                    "page": c["page_number"],
-                    "chunk_index": c["chunk_index"]
-                }
-                for c in batch
-            ]
-
-            batch_end = min(
-                start + BATCH_SIZE,
-                total_chunks
-            )
-
             logger.info(
                 f"Indexing chunks "
-                f"{start + 1}-{batch_end} "
+                f"{start + 1}-"
+                f"{min(start + BATCH_SIZE, total_chunks)} "
                 f"of {total_chunks}"
             )
 
-            # --------------------------------------------------------
-            # Chroma generates embeddings for this batch
-            # --------------------------------------------------------
-
-            self.collection.upsert(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas
+            self._index_batch(
+                doc_id=doc_id,
+                user_id=user_id,
+                filename=filename,
+                batch=batch
             )
 
-            # --------------------------------------------------------
-            # Release temporary references
-            # --------------------------------------------------------
-
             del batch
-            del ids
-            del documents
-            del metadatas
 
         logger.info(
             f"Indexed {total_chunks} chunks "
@@ -392,73 +707,27 @@ class RAGService:
         file_path: str
     ) -> int:
         """
-        Process, chunk and store a document in ChromaDB.
+        Memory-efficient document indexing.
 
-        This method is kept for compatibility with existing
-        code that may still call index_document().
+        This method now uses page-by-page processing.
         """
 
         logger.info(
-            f"Starting PDF processing: {filename}"
+            f"Starting memory-efficient PDF processing: "
+            f"{filename}"
         )
 
-        # ------------------------------------------------------------
-        # Extract text
-        # ------------------------------------------------------------
-
-        pages = self.extract_text_from_pdf(
-            file_path
-        )
-
-        if not pages:
-
-            raise ValueError(
-                "The uploaded PDF has no extractable text."
-            )
-
-        logger.info(
-            f"Extracted {len(pages)} pages "
-            f"from {filename}"
-        )
-
-        # ------------------------------------------------------------
-        # Create chunks
-        # ------------------------------------------------------------
-
-        chunks = self.chunk_text(
-            pages
-        )
-
-        # Release page data
-        del pages
-
-        if not chunks:
-
-            raise ValueError(
-                "No text chunks could be generated "
-                "from the PDF."
-            )
-
-        logger.info(
-            f"Generated {len(chunks)} chunks "
-            f"for {filename}"
-        )
-
-        # ------------------------------------------------------------
-        # Index using controlled batches
-        # ------------------------------------------------------------
-
-        total_chunks = self.index_chunks(
+        result = self.process_pdf_page_by_page(
             doc_id=doc_id,
             user_id=user_id,
             filename=filename,
-            chunks=chunks
+            file_path=file_path,
+            chunk_size=800,
+            chunk_overlap=100,
+            batch_size=8
         )
 
-        # Release chunk data
-        del chunks
-
-        return total_chunks
+        return result["chunk_count"]
 
     # ================================================================
     # DELETE DOCUMENT VECTORS
@@ -518,9 +787,6 @@ class RAGService:
     ) -> List[Dict[str, Any]]:
         """
         Retrieve the most relevant chunks for a query.
-
-        ChromaDB automatically generates the embedding for
-        the query using the configured embedding function.
         """
 
         # ------------------------------------------------------------
@@ -587,7 +853,7 @@ class RAGService:
         passages = []
 
         # ------------------------------------------------------------
-        # Check if results exist
+        # Check results
         # ------------------------------------------------------------
 
         if (
@@ -606,19 +872,11 @@ class RAGService:
                 else [0.0] * len(docs)
             )
 
-            # --------------------------------------------------------
-            # Convert results into application format
-            # --------------------------------------------------------
-
             for doc_text, meta, dist in zip(
                 docs,
                 metas,
                 distances
             ):
-
-                # ----------------------------------------------------
-                # Convert cosine distance to similarity
-                # ----------------------------------------------------
 
                 similarity = max(
                     0.0,
@@ -651,25 +909,14 @@ class RAGService:
         max_chunks: int = 20
     ) -> str:
         """
-        Fetch representative document chunks for quiz generation.
-
-        The number of chunks is intentionally limited so that
-        very large PDFs do not create unnecessarily large prompts.
+        Fetch a limited number of document chunks for quiz generation.
         """
-
-        # ------------------------------------------------------------
-        # Filter by user
-        # ------------------------------------------------------------
 
         where_clause = {
             "user_id": {
                 "$eq": user_id
             }
         }
-
-        # ------------------------------------------------------------
-        # Optionally filter by specific document
-        # ------------------------------------------------------------
 
         if doc_id:
 
@@ -688,10 +935,6 @@ class RAGService:
                 ]
             }
 
-        # ------------------------------------------------------------
-        # Fetch limited number of chunks
-        # ------------------------------------------------------------
-
         data = self.collection.get(
             where=where_clause,
             limit=max_chunks,
@@ -701,20 +944,12 @@ class RAGService:
             ]
         )
 
-        # ------------------------------------------------------------
-        # No data found
-        # ------------------------------------------------------------
-
         if (
             not data
             or not data.get("documents")
         ):
 
             return ""
-
-        # ------------------------------------------------------------
-        # Combine retrieved chunks into one context string
-        # ------------------------------------------------------------
 
         return "\n\n".join(
             data["documents"]

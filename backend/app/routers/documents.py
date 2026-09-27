@@ -46,13 +46,20 @@ async def upload_documents(
     """
     Upload one or multiple PDF documents.
 
-    Process:
-        1. Save PDF
-        2. Extract text
-        3. Create chunks
-        4. Generate embeddings in batches
-        5. Store vectors in ChromaDB
-        6. Save document information in PostgreSQL
+    Memory-efficient process:
+
+        1. Save PDF to disk
+        2. Create PostgreSQL document record
+        3. Read one PDF page at a time
+        4. Extract text from the current page
+        5. Create chunks from the current page
+        6. Index small batches into ChromaDB
+        7. Release page/chunk memory
+        8. Move to the next page
+        9. Save document information in PostgreSQL
+
+    This approach is designed for low-memory deployments
+    such as Render's free instance.
     """
 
     # ================================================================
@@ -60,6 +67,7 @@ async def upload_documents(
     # ================================================================
 
     if not files:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files provided."
@@ -151,7 +159,7 @@ async def upload_documents(
         )
 
         # ============================================================
-        # Create database document record
+        # Create PostgreSQL document record
         # ============================================================
 
         doc_record = Document(
@@ -163,99 +171,106 @@ async def upload_documents(
             chunk_count=0
         )
 
-        db.add(doc_record)
+        db.add(
+            doc_record
+        )
 
         # Get database-generated document ID
         db.flush()
 
         # ============================================================
-        # Process PDF
+        # Process PDF using memory-efficient RAG pipeline
         # ============================================================
 
         try:
 
             logger.info(
-                f"Starting processing: "
+                f"Starting memory-efficient processing: "
                 f"{file.filename}"
             )
 
             # --------------------------------------------------------
-            # Extract PDF text ONCE
+            # IMPORTANT:
+            #
+            # Do NOT call:
+            #
+            # extract_text_from_pdf()
+            # chunk_text()
+            # index_chunks()
+            #
+            # here because those methods can keep large amounts
+            # of PDF data in memory.
+            #
+            # Instead process the PDF page-by-page.
             # --------------------------------------------------------
 
-            pages = rag_service.extract_text_from_pdf(
-                file_path
+            result = rag_service.process_pdf_page_by_page(
+                doc_id=doc_record.id,
+                user_id=current_user.id,
+                filename=file.filename,
+                file_path=file_path,
+                chunk_size=800,
+                chunk_overlap=100,
+                batch_size=8
             )
 
-            if not pages:
+            # --------------------------------------------------------
+            # Get processing results
+            # --------------------------------------------------------
+
+            total_pages = result[
+                "total_pages"
+            ]
+
+            pages_with_text = result[
+                "pages_with_text"
+            ]
+
+            chunk_count = result[
+                "chunk_count"
+            ]
+
+            # --------------------------------------------------------
+            # Make sure useful text was found
+            # --------------------------------------------------------
+
+            if pages_with_text == 0:
+
                 raise ValueError(
                     "The uploaded PDF has no "
                     "extractable text."
                 )
 
-            total_pages = len(pages)
+            if chunk_count == 0:
 
-            logger.info(
-                f"Extracted "
-                f"{total_pages} pages "
-                f"from {file.filename}"
-            )
-
-            # --------------------------------------------------------
-            # Create text chunks
-            # --------------------------------------------------------
-
-            chunks = rag_service.chunk_text(
-                pages
-            )
-
-            # Release page data
-            del pages
-
-            if not chunks:
                 raise ValueError(
                     "No text chunks could be "
                     "generated from the PDF."
                 )
 
             logger.info(
-                f"Generated "
-                f"{len(chunks)} chunks "
-                f"for {file.filename}"
+                f"PDF processing complete: "
+                f"{file.filename} | "
+                f"pages={total_pages} | "
+                f"pages_with_text={pages_with_text} | "
+                f"chunks={chunk_count}"
             )
 
-            # --------------------------------------------------------
-            # Index chunks in batches
-            #
-            # Batch size is controlled inside rag_service.py.
-            # --------------------------------------------------------
+            # ========================================================
+            # Update document record
+            # ========================================================
 
-            chunk_count = rag_service.index_chunks(
-                doc_id=doc_record.id,
-                user_id=current_user.id,
-                filename=file.filename,
-                chunks=chunks
+            doc_record.total_pages = (
+                total_pages
             )
 
-            # Release chunk list
-            del chunks
-
-            logger.info(
-                f"Indexed "
-                f"{chunk_count} chunks "
-                f"for {file.filename}"
+            doc_record.chunk_count = (
+                chunk_count
             )
 
-            # --------------------------------------------------------
-            # Update database record
-            # --------------------------------------------------------
-
-            doc_record.total_pages = total_pages
-            doc_record.chunk_count = chunk_count
-
-            # --------------------------------------------------------
-            # Commit database transaction
-            # --------------------------------------------------------
+            # ========================================================
+            # Commit PostgreSQL transaction
+            # ========================================================
 
             db.commit()
 
@@ -310,7 +325,7 @@ async def upload_documents(
                 )
 
             # --------------------------------------------------------
-            # Roll back database transaction
+            # Roll back PostgreSQL transaction
             # --------------------------------------------------------
 
             db.rollback()
@@ -319,7 +334,9 @@ async def upload_documents(
             # Remove failed PDF
             # --------------------------------------------------------
 
-            if os.path.exists(file_path):
+            if os.path.exists(
+                file_path
+            ):
 
                 try:
 
@@ -351,9 +368,11 @@ async def upload_documents(
         finally:
 
             try:
+
                 await file.close()
 
             except Exception:
+
                 pass
 
     # ================================================================
@@ -484,7 +503,7 @@ def delete_document(
             )
 
     # ================================================================
-    # Delete database record
+    # Delete PostgreSQL database record
     # ================================================================
 
     db.delete(
