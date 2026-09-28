@@ -209,8 +209,8 @@ async def upload_documents(
                 user_id=current_user.id,
                 filename=file.filename,
                 file_path=file_path,
-                chunk_size=800,
-                chunk_overlap=100,
+                chunk_size=1000,
+                chunk_overlap=120,
                 batch_size=8
             )
 

@@ -18,8 +18,32 @@ class RAGService:
     def __init__(self):
 
         # ============================================================
-        # Initialize persistent ChromaDB
+        # Lazy ChromaDB initialization
         # ============================================================
+        # Chroma and the local embedding model are NOT initialized
+        # during FastAPI startup. They are initialized only when
+        # upload, search, delete, or quiz/RAG functionality needs them.
+        # This makes the normal application startup much faster.
+
+        self.chroma_client = None
+        self.collection = None
+        self.embedding_function = None
+
+        self.collection_name = (
+            "studygenie_knowledge_base_v2"
+        )
+
+        logger.info(
+            "RAGService created - ChromaDB initialization deferred."
+        )
+
+    def _ensure_chroma(self):
+        """Initialize ChromaDB only when RAG functionality needs it."""
+
+        if self.collection is not None:
+            return
+
+        logger.info("Initializing ChromaDB and embedding model...")
 
         self.chroma_client = chromadb.PersistentClient(
             path=settings.CHROMA_DB_DIR,
@@ -28,18 +52,7 @@ class RAGService:
             )
         )
 
-        # ============================================================
-        # ChromaDB built-in embedding function
-        #
-        # This avoids SentenceTransformer / PyTorch dependencies
-        # and keeps deployment memory requirements lower.
-        # ============================================================
-
         self.embedding_function = DefaultEmbeddingFunction()
-
-        self.collection_name = (
-            "studygenie_knowledge_base_v2"
-        )
 
         self.collection = (
             self.chroma_client.get_or_create_collection(
@@ -361,6 +374,8 @@ class RAGService:
         if not batch:
 
             return
+
+        self._ensure_chroma()
 
         ids = [
             (
@@ -742,6 +757,8 @@ class RAGService:
         Remove all ChromaDB vectors belonging to a document.
         """
 
+        self._ensure_chroma()
+
         try:
 
             self.collection.delete(
@@ -788,6 +805,8 @@ class RAGService:
         """
         Retrieve the most relevant chunks for a query.
         """
+
+        self._ensure_chroma()
 
         # ------------------------------------------------------------
         # Build metadata filter
@@ -911,6 +930,8 @@ class RAGService:
         """
         Fetch a limited number of document chunks for quiz generation.
         """
+
+        self._ensure_chroma()
 
         where_clause = {
             "user_id": {
