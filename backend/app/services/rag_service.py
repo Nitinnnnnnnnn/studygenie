@@ -1,10 +1,22 @@
 import re
+import uuid
 import logging
 from typing import List, Dict, Any, Optional
 
 import pypdf
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+    MatchAny,
+    PayloadSchemaType,
+)
+
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from app.config import settings
@@ -16,57 +28,141 @@ logger = logging.getLogger(__name__)
 class RAGService:
 
     def __init__(self):
-
         # ============================================================
-        # Lazy ChromaDB initialization
+        # Lazy Qdrant initialization
         # ============================================================
-        # Chroma and the local embedding model are NOT initialized
-        # during FastAPI startup. They are initialized only when
-        # upload, search, delete, or quiz/RAG functionality needs them.
-        # This makes the normal application startup much faster.
 
-        self.chroma_client = None
-        self.collection = None
+        self.qdrant_client = None
         self.embedding_function = None
 
-        self.collection_name = (
-            "studygenie_knowledge_base_v2"
-        )
+        self.collection_name = "studygenie_knowledge_base"
 
         logger.info(
-            "RAGService created - ChromaDB initialization deferred."
+            "RAGService created - Qdrant initialization deferred."
         )
 
-    def _ensure_chroma(self):
-        """Initialize ChromaDB only when RAG functionality needs it."""
+    # ================================================================
+    # QDRANT INITIALIZATION
+    # ================================================================
 
-        if self.collection is not None:
+    def _ensure_qdrant(self):
+        """
+        Initialize Qdrant and the embedding model only when
+        RAG functionality needs them.
+        """
+
+        if self.qdrant_client is not None:
             return
 
-        logger.info("Initializing ChromaDB and embedding model...")
+        logger.info("Initializing Qdrant and embedding model...")
 
-        self.chroma_client = chromadb.PersistentClient(
-            path=settings.CHROMA_DB_DIR,
-            settings=ChromaSettings(
-                anonymized_telemetry=False
+        if not settings.QDRANT_URL:
+            raise RuntimeError(
+                "QDRANT_URL is not configured."
             )
+
+        if not settings.QDRANT_API_KEY:
+            raise RuntimeError(
+                "QDRANT_API_KEY is not configured."
+            )
+
+        # ------------------------------------------------------------
+        # Connect to Qdrant Cloud
+        # ------------------------------------------------------------
+
+        self.qdrant_client = QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY
         )
+
+        # ------------------------------------------------------------
+        # Local embedding model
+        #
+        # Chroma's DefaultEmbeddingFunction uses
+        # all-MiniLM-L6-v2 and produces 384-dimensional vectors.
+        # ------------------------------------------------------------
 
         self.embedding_function = DefaultEmbeddingFunction()
 
-        self.collection = (
-            self.chroma_client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={
-                    "hnsw:space": "cosine"
-                },
-                embedding_function=self.embedding_function
+        # ------------------------------------------------------------
+        # Create collection if it does not already exist
+        # ------------------------------------------------------------
+
+        if not self.qdrant_client.collection_exists(
+            self.collection_name
+        ):
+
+            logger.info(
+                f"Creating Qdrant collection: "
+                f"{self.collection_name}"
             )
-        )
+
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=384,
+                    distance=Distance.COSINE
+                )
+            )
+
+            logger.info(
+                f"Qdrant collection created: "
+                f"{self.collection_name}"
+            )
+
+        else:
+
+            logger.info(
+                f"Qdrant collection already exists: "
+                f"{self.collection_name}"
+            )
+
+        # ------------------------------------------------------------
+        # Create payload indexes
+        #
+        # These are required because we filter by user_id and doc_id.
+        # ------------------------------------------------------------
+
+        try:
+
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="user_id",
+                field_schema=PayloadSchemaType.INTEGER
+            )
+
+            logger.info(
+                "Qdrant payload index ready: user_id"
+            )
+
+        except Exception as e:
+
+            logger.info(
+                f"user_id payload index already exists "
+                f"or could not be recreated: {e}"
+            )
+
+        try:
+
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="doc_id",
+                field_schema=PayloadSchemaType.INTEGER
+            )
+
+            logger.info(
+                "Qdrant payload index ready: doc_id"
+            )
+
+        except Exception as e:
+
+            logger.info(
+                f"doc_id payload index already exists "
+                f"or could not be recreated: {e}"
+            )
 
         logger.info(
-            f"ChromaDB collection initialized: "
-            f"{self.collection_name}"
+            "Qdrant initialization complete."
         )
 
     # ================================================================
@@ -80,9 +176,8 @@ class RAGService:
         """
         Extract text from the entire PDF.
 
-        This method is kept for compatibility with existing code.
+        Kept for compatibility with existing code.
 
-        NOTE:
         For large PDFs, prefer process_pdf_page_by_page()
         because this method keeps all extracted pages in memory.
         """
@@ -95,7 +190,9 @@ class RAGService:
                 file_path
             )
 
-            total_pages = len(reader.pages)
+            total_pages = len(
+                reader.pages
+            )
 
             logger.info(
                 f"Starting PDF extraction: "
@@ -175,7 +272,6 @@ class RAGService:
             ).strip()
 
             if not clean_text:
-
                 return None
 
             return clean_text
@@ -202,9 +298,9 @@ class RAGService:
         """
         Split pages into overlapping chunks.
 
-        This method is kept for compatibility with existing code.
+        Kept for compatibility with existing code.
 
-        For large PDFs, use process_pdf_page_by_page() instead.
+        For large PDFs, use process_pdf_page_by_page().
         """
 
         chunks = []
@@ -213,9 +309,13 @@ class RAGService:
 
         for page_data in pages:
 
-            page_num = page_data["page_number"]
+            page_num = page_data[
+                "page_number"
+            ]
 
-            text = page_data["text"]
+            text = page_data[
+                "text"
+            ]
 
             page_chunks = self._chunk_single_page(
                 text=text,
@@ -225,9 +325,13 @@ class RAGService:
                 chunk_overlap=chunk_overlap
             )
 
-            chunks.extend(page_chunks)
+            chunks.extend(
+                page_chunks
+            )
 
-            chunk_counter += len(page_chunks)
+            chunk_counter += len(
+                page_chunks
+            )
 
         logger.info(
             f"Chunking complete: "
@@ -250,15 +354,11 @@ class RAGService:
     ) -> List[Dict[str, Any]]:
         """
         Create chunks from ONE page only.
-
-        This prevents the entire PDF from being converted into
-        chunks at once.
         """
 
         chunks = []
 
         if not text:
-
             return chunks
 
         # ------------------------------------------------------------
@@ -291,7 +391,9 @@ class RAGService:
 
             end = start + chunk_size
 
-            chunk_str = text[start:end]
+            chunk_str = text[
+                start:end
+            ]
 
             # --------------------------------------------------------
             # Try to end at sentence boundary
@@ -317,7 +419,9 @@ class RAGService:
                         start:end
                     ]
 
-            clean_chunk = chunk_str.strip()
+            clean_chunk = (
+                chunk_str.strip()
+            )
 
             # --------------------------------------------------------
             # Ignore extremely small chunks
@@ -365,53 +469,115 @@ class RAGService:
         batch: List[Dict[str, Any]]
     ):
         """
-        Index one small batch into ChromaDB.
+        Index one small batch into Qdrant.
 
-        Batch size is intentionally small because Render's
-        free instance has limited memory.
+        Qdrant point IDs must be either:
+        - unsigned integers
+        - UUIDs
+
+        Therefore deterministic UUIDs are used here.
         """
 
         if not batch:
-
             return
 
-        self._ensure_chroma()
+        self._ensure_qdrant()
 
-        ids = [
-            (
-                f"user_{user_id}_"
-                f"doc_{doc_id}_"
-                f"chunk_{chunk['chunk_index']}"
-            )
-            for chunk in batch
-        ]
+        # ------------------------------------------------------------
+        # Extract text
+        # ------------------------------------------------------------
 
         documents = [
             chunk["text"]
             for chunk in batch
         ]
 
-        metadatas = [
-            {
+        # ------------------------------------------------------------
+        # Generate embeddings
+        # ------------------------------------------------------------
+
+        embeddings = (
+            self.embedding_function(
+                documents
+            )
+        )
+
+        # ------------------------------------------------------------
+        # Create Qdrant points
+        # ------------------------------------------------------------
+
+        points = []
+
+        for chunk, embedding in zip(
+            batch,
+            embeddings
+        ):
+
+            chunk_index = chunk[
+                "chunk_index"
+            ]
+
+            # --------------------------------------------------------
+            # Deterministic UUID
+            #
+            # Same user + document + chunk always gets
+            # the same UUID.
+            # --------------------------------------------------------
+
+            point_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    (
+                        f"user_{user_id}_"
+                        f"doc_{doc_id}_"
+                        f"chunk_{chunk_index}"
+                    )
+                )
+            )
+
+            payload = {
                 "user_id": user_id,
                 "doc_id": doc_id,
                 "filename": filename,
-                "page": chunk["page_number"],
-                "chunk_index": chunk["chunk_index"]
+                "page": chunk[
+                    "page_number"
+                ],
+                "chunk_index": chunk_index,
+                "text": chunk[
+                    "text"
+                ]
             }
-            for chunk in batch
-        ]
 
-        self.collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
+            points.append(
+                PointStruct(
+                    id=point_id,
+                    vector=embedding,
+                    payload=payload
+                )
+            )
+
+        # ------------------------------------------------------------
+        # Upload to Qdrant
+        # ------------------------------------------------------------
+
+        self.qdrant_client.upsert(
+            collection_name=self.collection_name,
+            points=points,
+            wait=True
         )
 
-        # Explicitly release temporary objects
-        del ids
+        logger.info(
+            f"Indexed {len(points)} chunks "
+            f"into Qdrant for doc_id={doc_id}"
+        )
+
+        # ------------------------------------------------------------
+        # Release temporary objects
+        # ------------------------------------------------------------
+
         del documents
-        del metadatas
+        del embeddings
+        del points
 
     # ================================================================
     # PAGE-BY-PAGE PDF PROCESSING
@@ -440,22 +606,20 @@ class RAGService:
              ↓
             create chunks
              ↓
-            small ChromaDB batch
+            small Qdrant batch
              ↓
             release memory
              ↓
             next page
-
-        The entire PDF's pages and chunks are NEVER stored
-        in memory simultaneously.
         """
 
         total_pages = 0
         pages_with_text = 0
         total_chunks = 0
 
-        # Temporary batch containing only a few chunks
         batch = []
+
+        reader = None
 
         try:
 
@@ -468,12 +632,13 @@ class RAGService:
             )
 
             logger.info(
-                f"Starting memory-efficient PDF processing: "
-                f"{filename}"
+                f"Starting memory-efficient "
+                f"PDF processing: {filename}"
             )
 
             logger.info(
-                f"Total PDF pages: {total_pages}"
+                f"Total PDF pages: "
+                f"{total_pages}"
             )
 
             # --------------------------------------------------------
@@ -495,7 +660,6 @@ class RAGService:
                 )
 
                 if not page_text:
-
                     continue
 
                 pages_with_text += 1
@@ -512,16 +676,17 @@ class RAGService:
                     chunk_overlap=chunk_overlap
                 )
 
-                # page_text is no longer needed
                 del page_text
 
                 # ----------------------------------------------------
-                # Add page chunks to small batch
+                # Add chunks to small batch
                 # ----------------------------------------------------
 
                 for chunk in page_chunks:
 
-                    batch.append(chunk)
+                    batch.append(
+                        chunk
+                    )
 
                     total_chunks += 1
 
@@ -537,11 +702,14 @@ class RAGService:
                             + 1
                         )
 
-                        batch_end = total_chunks
+                        batch_end = (
+                            total_chunks
+                        )
 
                         logger.info(
                             f"Indexing chunks "
-                            f"{batch_start}-{batch_end} "
+                            f"{batch_start}-"
+                            f"{batch_end} "
                             f"of {filename}"
                         )
 
@@ -552,12 +720,7 @@ class RAGService:
                             batch=batch
                         )
 
-                        # Completely release batch
                         batch.clear()
-
-                # ----------------------------------------------------
-                # Release page chunks
-                # ----------------------------------------------------
 
                 del page_chunks
 
@@ -572,7 +735,8 @@ class RAGService:
 
                     logger.info(
                         f"Processed "
-                        f"{page_index}/{total_pages} pages | "
+                        f"{page_index}/"
+                        f"{total_pages} pages | "
                         f"chunks indexed/queued: "
                         f"{total_chunks}"
                     )
@@ -593,7 +757,8 @@ class RAGService:
 
                 logger.info(
                     f"Indexing final chunks "
-                    f"{batch_start}-{batch_end}"
+                    f"{batch_start}-"
+                    f"{batch_end}"
                 )
 
                 self._index_batch(
@@ -609,7 +774,8 @@ class RAGService:
                 f"PDF processing complete: "
                 f"{filename} | "
                 f"pages={total_pages} | "
-                f"pages_with_text={pages_with_text} | "
+                f"pages_with_text="
+                f"{pages_with_text} | "
                 f"chunks={total_chunks}"
             )
 
@@ -626,16 +792,11 @@ class RAGService:
                 f"{filename}: {e}"
             )
 
-            # Release temporary memory
             batch.clear()
 
             raise
 
         finally:
-
-            # --------------------------------------------------------
-            # Release PDF reader
-            # --------------------------------------------------------
 
             try:
                 del reader
@@ -659,20 +820,19 @@ class RAGService:
         Index an already-created list of chunks.
 
         Kept for compatibility with existing code.
-
-        Uses batch size 8 for low-memory deployments.
         """
 
         if not chunks:
-
             return 0
 
         BATCH_SIZE = 8
 
-        total_chunks = len(chunks)
+        total_chunks = len(
+            chunks
+        )
 
         logger.info(
-            f"Starting ChromaDB indexing: "
+            f"Starting Qdrant indexing: "
             f"{total_chunks} chunks, "
             f"batch size={BATCH_SIZE}"
         )
@@ -724,12 +884,12 @@ class RAGService:
         """
         Memory-efficient document indexing.
 
-        This method now uses page-by-page processing.
+        Uses page-by-page processing.
         """
 
         logger.info(
-            f"Starting memory-efficient PDF processing: "
-            f"{filename}"
+            f"Starting memory-efficient "
+            f"PDF processing: {filename}"
         )
 
         result = self.process_pdf_page_by_page(
@@ -742,7 +902,9 @@ class RAGService:
             batch_size=8
         )
 
-        return result["chunk_count"]
+        return result[
+            "chunk_count"
+        ]
 
     # ================================================================
     # DELETE DOCUMENT VECTORS
@@ -754,32 +916,38 @@ class RAGService:
         user_id: int
     ):
         """
-        Remove all ChromaDB vectors belonging to a document.
+        Remove all Qdrant vectors belonging to a document.
         """
 
-        self._ensure_chroma()
+        self._ensure_qdrant()
 
         try:
 
-            self.collection.delete(
-                where={
-                    "$and": [
-                        {
-                            "doc_id": {
-                                "$eq": doc_id
-                            }
-                        },
-                        {
-                            "user_id": {
-                                "$eq": user_id
-                            }
-                        }
-                    ]
-                }
+            delete_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="doc_id",
+                        match=MatchValue(
+                            value=doc_id
+                        )
+                    ),
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(
+                            value=user_id
+                        )
+                    )
+                ]
+            )
+
+            self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=delete_filter,
+                wait=True
             )
 
             logger.info(
-                f"Deleted vectors for "
+                f"Deleted Qdrant vectors for "
                 f"user_id={user_id}, "
                 f"doc_id={doc_id}"
             )
@@ -787,7 +955,7 @@ class RAGService:
         except Exception as e:
 
             logger.warning(
-                f"Failed to delete ChromaDB vectors "
+                f"Failed to delete Qdrant vectors "
                 f"for doc_id={doc_id}: {e}"
             )
 
@@ -803,117 +971,109 @@ class RAGService:
         top_k: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve the most relevant chunks for a query.
+        Retrieve the most relevant chunks from Qdrant.
         """
 
-        self._ensure_chroma()
+        self._ensure_qdrant()
 
         # ------------------------------------------------------------
-        # Build metadata filter
+        # Create query embedding
         # ------------------------------------------------------------
 
-        if doc_ids and len(doc_ids) == 1:
-
-            where_clause = {
-                "$and": [
-                    {
-                        "user_id": {
-                            "$eq": user_id
-                        }
-                    },
-                    {
-                        "doc_id": {
-                            "$eq": doc_ids[0]
-                        }
-                    }
-                ]
-            }
-
-        elif doc_ids and len(doc_ids) > 1:
-
-            where_clause = {
-                "$and": [
-                    {
-                        "user_id": {
-                            "$eq": user_id
-                        }
-                    },
-                    {
-                        "doc_id": {
-                            "$in": doc_ids
-                        }
-                    }
-                ]
-            }
-
-        else:
-
-            where_clause = {
-                "user_id": {
-                    "$eq": user_id
-                }
-            }
+        query_embedding = (
+            self.embedding_function(
+                [query]
+            )[0]
+        )
 
         # ------------------------------------------------------------
-        # Query ChromaDB
+        # Build Qdrant filter
         # ------------------------------------------------------------
 
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            where=where_clause,
-            include=[
-                "documents",
-                "metadatas",
-                "distances"
-            ]
+        filter_conditions = [
+            FieldCondition(
+                key="user_id",
+                match=MatchValue(
+                    value=user_id
+                )
+            )
+        ]
+
+        if doc_ids:
+
+            if len(doc_ids) == 1:
+
+                filter_conditions.append(
+                    FieldCondition(
+                        key="doc_id",
+                        match=MatchValue(
+                            value=doc_ids[0]
+                        )
+                    )
+                )
+
+            else:
+
+                filter_conditions.append(
+                    FieldCondition(
+                        key="doc_id",
+                        match=MatchAny(
+                            any=doc_ids
+                        )
+                    )
+                )
+
+        query_filter = Filter(
+            must=filter_conditions
+        )
+
+        # ------------------------------------------------------------
+        # Query Qdrant
+        # ------------------------------------------------------------
+
+        results = (
+            self.qdrant_client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                query_filter=query_filter,
+                limit=top_k,
+                with_payload=True
+            )
         )
 
         passages = []
 
         # ------------------------------------------------------------
-        # Check results
+        # Process results
         # ------------------------------------------------------------
 
-        if (
-            results
-            and results.get("documents")
-            and results["documents"][0]
-        ):
+        for result in results.points:
 
-            docs = results["documents"][0]
-
-            metas = results["metadatas"][0]
-
-            distances = (
-                results["distances"][0]
-                if results.get("distances")
-                else [0.0] * len(docs)
+            payload = (
+                result.payload or {}
             )
 
-            for doc_text, meta, dist in zip(
-                docs,
-                metas,
-                distances
-            ):
-
-                similarity = max(
-                    0.0,
-                    1.0 - dist
-                )
-
-                passages.append(
-                    {
-                        "doc_id": meta["doc_id"],
-                        "filename": meta["filename"],
-                        "page": meta["page"],
-                        "chunk_text": doc_text,
-                        "score": round(
-                            similarity,
-                            4
-                        )
-                    }
-                )
+            passages.append(
+                {
+                    "doc_id": payload.get(
+                        "doc_id"
+                    ),
+                    "filename": payload.get(
+                        "filename"
+                    ),
+                    "page": payload.get(
+                        "page"
+                    ),
+                    "chunk_text": payload.get(
+                        "text",
+                        ""
+                    ),
+                    "score": round(
+                        float(result.score),
+                        4
+                    )
+                }
+            )
 
         return passages
 
@@ -928,52 +1088,76 @@ class RAGService:
         max_chunks: int = 20
     ) -> str:
         """
-        Fetch a limited number of document chunks for quiz generation.
+        Fetch a limited number of document chunks.
+
+        Used by quiz generation.
         """
 
-        self._ensure_chroma()
+        self._ensure_qdrant()
 
-        where_clause = {
-            "user_id": {
-                "$eq": user_id
-            }
-        }
+        # ------------------------------------------------------------
+        # Build filter
+        # ------------------------------------------------------------
 
-        if doc_id:
+        filter_conditions = [
+            FieldCondition(
+                key="user_id",
+                match=MatchValue(
+                    value=user_id
+                )
+            )
+        ]
 
-            where_clause = {
-                "$and": [
-                    {
-                        "user_id": {
-                            "$eq": user_id
-                        }
-                    },
-                    {
-                        "doc_id": {
-                            "$eq": doc_id
-                        }
-                    }
-                ]
-            }
+        if doc_id is not None:
 
-        data = self.collection.get(
-            where=where_clause,
-            limit=max_chunks,
-            include=[
-                "documents",
-                "metadatas"
-            ]
+            filter_conditions.append(
+                FieldCondition(
+                    key="doc_id",
+                    match=MatchValue(
+                        value=doc_id
+                    )
+                )
+            )
+
+        scroll_filter = Filter(
+            must=filter_conditions
         )
 
-        if (
-            not data
-            or not data.get("documents")
-        ):
+        # ------------------------------------------------------------
+        # Scroll Qdrant
+        # ------------------------------------------------------------
 
+        points, next_offset = (
+            self.qdrant_client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=scroll_filter,
+                limit=max_chunks,
+                with_payload=True,
+                with_vectors=False
+            )
+        )
+
+        if not points:
             return ""
 
+        documents = []
+
+        for point in points:
+
+            payload = (
+                point.payload or {}
+            )
+
+            text = payload.get(
+                "text",
+                ""
+            )
+
+            if text:
+                documents.append(text)
+
         return "\n\n".join(
-            data["documents"]
+            documents
         )
 
 

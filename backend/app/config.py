@@ -14,17 +14,20 @@ class Settings(BaseSettings):
     # AI API
     # ==============================
 
-    # Groq API key for chat and quiz generation
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv(
+        "GROQ_API_KEY",
+        ""
+    )
 
-    # Groq chat model
     GROQ_CHAT_MODEL: str = os.getenv(
         "GROQ_CHAT_MODEL",
         "openai/gpt-oss-20b"
     )
 
     # Local embedding model
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    EMBEDDING_MODEL: str = (
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     # ==============================
     # Database
@@ -50,17 +53,29 @@ class Settings(BaseSettings):
     )
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
-        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+        os.getenv(
+            "ACCESS_TOKEN_EXPIRE_MINUTES",
+            "1440"
+        )
     )
 
     # ==============================
-    # Vector DB & Storage
+    # Qdrant Vector Database
     # ==============================
 
-    CHROMA_DB_DIR: str = os.getenv(
-        "CHROMA_DB_DIR",
-        str(BASE_DIR / "chroma_data")
+    QDRANT_URL: str = os.getenv(
+        "QDRANT_URL",
+        ""
     )
+
+    QDRANT_API_KEY: str = os.getenv(
+        "QDRANT_API_KEY",
+        ""
+    )
+
+    # ==============================
+    # File Storage
+    # ==============================
 
     UPLOAD_DIR: str = os.getenv(
         "UPLOAD_DIR",
@@ -76,7 +91,16 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+# ==============================
 # Ensure required directories exist
-os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-os.makedirs(settings.CHROMA_DB_DIR, exist_ok=True)
-os.makedirs(BASE_DIR / "data", exist_ok=True)
+# ==============================
+
+os.makedirs(
+    settings.UPLOAD_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    BASE_DIR / "data",
+    exist_ok=True
+)
